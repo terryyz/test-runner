@@ -1,0 +1,2 @@
+{"repository": "/path/to/repository1", "tests": [{"path": "tests/test_module1.py", "tested_files": ["src/module1.py"]}, {"path": "tests/test_module2.py", "tested_files": ["src/module2.py"]}]}
+{"repository": "/path/to/repository2", "tests": [{"path": "tests/test_feature.py", "tested_files": ["src/feature.py", "src/utils.py"]}]} 
