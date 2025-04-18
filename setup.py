@@ -31,6 +31,7 @@ setup(
     entry_points={
         "console_scripts": [
             "test-runner=run_tests:main",
+            "run_tests=run_tests:main",
         ],
     },
 ) 

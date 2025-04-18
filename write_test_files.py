@@ -34,7 +34,7 @@ def parse_arguments():
                         help="Skip repositories matching this regex pattern")
     parser.add_argument("--dry-run", "-d", action="store_true", help="Dry run (don't actually write files)")
     parser.add_argument("--convert-format", "-c", dest="convert_output", 
-                        help="Convert input format to format compatible with run_tests.py and write to specified file")
+                        help="Generate test metadata in format compatible with run_tests.py and write to specified file")
     return parser.parse_args()
 
 
@@ -44,80 +44,15 @@ def generate_test_filename(original_file, index):
     return f"test_{base_name}_{index}.py"
 
 
-def convert_test_format(input_file, output_file):
-    """
-    Convert the input JSONL format to a format compatible with run_tests.py.
-    The input format has "tests" as an object with file names as keys.
-    The output format has "tests" as an array of objects with "path" and "tested_files" properties.
-    
-    Args:
-        input_file: Path to the input JSONL file
-        output_file: Path to the output JSONL file to be written
-    
-    Returns:
-        int: Number of records converted
-    """
-    converted_count = 0
-    
-    print(f"Converting format from {input_file} to {output_file}")
-    
-    # Open output file for writing
-    with open(output_file, 'w') as out_f:
-        # Read the input JSONL file line by line
-        with open(input_file, 'r') as in_f:
-            for line_num, line in enumerate(tqdm(in_f, desc="Converting test format", unit="repo"), 1):
-                try:
-                    # Parse the JSON object from each line
-                    repo_data = json.loads(line)
-                    repo_path = repo_data.get("repository")
-                    
-                    if not repo_path:
-                        print(f"Warning: Line {line_num} - Missing repository path, skipping")
-                        continue
-                    
-                    # Start building the new format
-                    new_format = {
-                        "repository": repo_path,
-                        "tests": []
-                    }
-                    
-                    # Process each tested file from the "tests" dictionary
-                    test_files = repo_data.get("tests", {})
-                    for tested_file, test_info in test_files.items():
-                        path = test_info.get("path")
-                        dependencies = test_info.get("dependencies", [])
-                        
-                        # Skip if path is not provided
-                        if not path:
-                            continue
-                        
-                        # Add to the new format's tests array
-                        new_format["tests"].append({
-                            "path": path,
-                            "tested_files": dependencies
-                        })
-                    
-                    # Write the new format to the output file
-                    out_f.write(json.dumps(new_format) + "\n")
-                    converted_count += 1
-                    
-                except json.JSONDecodeError:
-                    print(f"Error: Line {line_num} is not valid JSON, skipping")
-                    continue
-                except Exception as e:
-                    print(f"Error processing line {line_num}: {str(e)}")
-                    continue
-    
-    print(f"Successfully converted {converted_count} records to {output_file}")
-    return converted_count
-
-
-def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False):
+def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False, convert_output=None):
     """Process the input JSONL file and write test files."""
     processed_repos = 0
     skipped_repos = 0
     written_files = 0
     skipped_files = 0
+    
+    # Structure to store test metadata for conversion format
+    test_metadata = {}
 
     # Compile regex pattern if provided
     skip_regex = None
@@ -151,13 +86,21 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                     skipped_repos += 1
                     continue
                 
+                # Initialize test metadata for this repository
+                if convert_output:
+                    test_metadata[repo_path] = {
+                        "repository": repo_path,
+                        "tests": []
+                    }
+                
                 # Adjust repository path if working_dir is provided
+                adjusted_repo_path = repo_path
                 if working_dir:
-                    repo_path = os.path.join(working_dir, repo_path)
+                    adjusted_repo_path = os.path.join(working_dir, repo_path)
                 
                 # Check if repository directory exists
-                if not os.path.isdir(repo_path):
-                    tqdm.write(f"Warning: Repository directory not found: {repo_path}")
+                if not os.path.isdir(adjusted_repo_path):
+                    tqdm.write(f"Warning: Repository directory not found: {adjusted_repo_path}")
                     # Count total test contents across all test files
                     test_count = sum(len(test_info.get("content", [])) 
                                     for test_info in repo_data.get("tests", {}).values() 
@@ -166,7 +109,7 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                     skipped_files += test_count
                     continue
                 
-                tqdm.write(f"\nProcessing repository: {repo_path}")
+                tqdm.write(f"\nProcessing repository: {adjusted_repo_path}")
                 processed_repos += 1
                 
                 # Process each tested file from the "tests" dictionary
@@ -185,10 +128,10 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                     # Use the path of the tested file to determine where to write tests
                     if not path:
                         # If path is not specified, use the tested_file as path
-                        tested_file_path = os.path.join(repo_path, tested_file)
+                        tested_file_path = os.path.join(adjusted_repo_path, tested_file)
                     else:
                         # If path is specified, use it
-                        tested_file_path = os.path.join(repo_path, path)
+                        tested_file_path = os.path.join(adjusted_repo_path, path)
                     
                     # Get the directory of the tested file
                     tested_file_dir = os.path.dirname(tested_file_path)
@@ -202,6 +145,12 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                         # Generate test filename
                         test_filename = generate_test_filename(tested_file, idx)
                         full_path = os.path.join(tested_file_dir, test_filename)
+                        
+                        # Calculate relative path for the test file from the repository root
+                        if working_dir:
+                            relative_path = str(Path(full_path).relative_to(adjusted_repo_path))
+                        else:
+                            relative_path = test_filename
                         
                         # Check if parent directory exists, create if needed
                         if not os.path.isdir(tested_file_dir):
@@ -220,6 +169,13 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                             tqdm.write(f"  Testing file: {tested_file}")
                             tqdm.write(f"  Dependencies: {', '.join(dependencies)}")
                             written_files += 1
+                            
+                            # Add test metadata
+                            if convert_output:
+                                test_metadata[repo_path]["tests"].append({
+                                    "path": relative_path,
+                                    "tested_files": tested_file  # Changed from list to string
+                                })
                         else:
                             try:
                                 with open(full_path, 'w') as test_f:
@@ -228,6 +184,13 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
                                 tqdm.write(f"  Testing file: {tested_file}")
                                 tqdm.write(f"  Dependencies: {', '.join(dependencies)}")
                                 written_files += 1
+                                
+                                # Add test metadata
+                                if convert_output:
+                                    test_metadata[repo_path]["tests"].append({
+                                        "path": relative_path,
+                                        "tested_files": tested_file  # Changed from list to string
+                                    })
                             except Exception as e:
                                 tqdm.write(f"  Error writing test file {full_path}: {str(e)}")
                                 skipped_files += 1
@@ -245,6 +208,32 @@ def process_jsonl(input_file, working_dir=None, skip_pattern=None, dry_run=False
     print(f"Skipped repositories: {skipped_repos}")
     print(f"Test files written: {written_files}")
     print(f"Test files skipped: {skipped_files}")
+    
+    # Write converted format if requested
+    if convert_output:
+        write_converted_format(test_metadata, convert_output)
+    
+    return processed_repos, skipped_repos, written_files, skipped_files
+
+
+def write_converted_format(test_metadata, output_file):
+    """
+    Write the test metadata in the format compatible with run_tests.py.
+    
+    Args:
+        test_metadata: Dictionary mapping repository path to test metadata
+        output_file: Path to the output JSONL file to be written
+    """
+    print(f"\nWriting test metadata to {output_file}")
+    
+    converted_count = 0
+    with open(output_file, 'w') as out_f:
+        for repo_path, metadata in test_metadata.items():
+            if metadata["tests"]:  # Only write if there are tests
+                out_f.write(json.dumps(metadata) + "\n")
+                converted_count += 1
+    
+    print(f"Successfully wrote test metadata for {converted_count} repositories to {output_file}")
 
 
 def main():
@@ -256,16 +245,8 @@ def main():
         print(f"Error: Input file '{args.input_file}' does not exist")
         sys.exit(1)
     
-    # Check if conversion is requested
-    if args.convert_output:
-        convert_test_format(args.input_file, args.convert_output)
-        print(f"Format conversion completed. Output written to {args.convert_output}")
-        if not args.dry_run and not args.working_dir:
-            # If only conversion was requested without other processing flags, exit
-            sys.exit(0)
-    
-    # Process the JSONL file
-    process_jsonl(args.input_file, args.working_dir, args.skip_pattern, args.dry_run)
+    # Process the JSONL file, generating test files and conversion format if requested
+    process_jsonl(args.input_file, args.working_dir, args.skip_pattern, args.dry_run, args.convert_output)
 
 
 if __name__ == "__main__":
