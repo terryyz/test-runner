@@ -38,7 +38,41 @@ import threading
 import functools
 import traceback
 
-from utils.logger import configure_process_logging
+# Modify import to work from any directory
+# First determine the script's directory to use as base for importing
+SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+# Add the script's directory to Python path
+sys.path.insert(0, str(SCRIPT_DIR))
+
+try:
+    # Try the relative import first (assuming we're in the test-runner directory)
+    from utils.logger import configure_process_logging
+except ImportError:
+    # If that fails, define the function directly here as a fallback
+    def configure_process_logging(verbose: bool) -> logging.Logger:
+        """Configure logging for a worker process.
+        
+        Args:
+            verbose (bool): Whether to enable verbose logging. When disabled, no logs will be shown.
+            
+        Returns:
+            logging.Logger: Configured logger instance
+        """
+        logger = logging.getLogger('test_runner')
+        logger.setLevel(logging.INFO if verbose else logging.CRITICAL)  # Only show logs in verbose mode
+        
+        # Remove any existing handlers
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        
+        # Add a new handler that only shows logs if verbose is True
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO if verbose else logging.CRITICAL)  # Only show logs in verbose mode
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+        return logger
 
 
 def parse_arguments():
@@ -655,11 +689,13 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
         
         # Run pytest on the test files
         if test_files:
+            # print the working directory
+            add_log_entry(f"Working directory: {working_dir}")
             add_log_entry(f"Running pytest on {len(test_files)} test files")
             
-            # Prepare test files paths for pytest
-            test_file_paths = [str(f) for f in test_files]
-            
+            # Prepare test files paths for pytest - use paths relative to working directory
+            test_file_paths = [str(f.relative_to(working_dir)) for f in test_files]
+            add_log_entry(f"Test file paths: {test_file_paths}")
             # Run pytest with XML output for parsing results
             xml_output_file = tempfile.mktemp(suffix=".xml")
             
