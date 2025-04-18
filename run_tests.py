@@ -2,15 +2,17 @@
 """
 Simplified version of Repo2Run that only implements the --run-tests functionality.
 
-This script reads test.jsonl files containing previously extracted test files
+This script reads test input files (default: test.jsonl) containing previously extracted test files
 and runs the tests using the current Python environment. It handles both verbose
 and non-verbose modes.
 
 Usage:
-    python run_tests.py --output-dir output_path [--verbose] [--num-workers N]
+    python run_tests.py --output-dir output_path [--input-file input.jsonl] [--output-file results.jsonl] [--verbose] [--num-workers N]
 
 Options:
-    --output-dir DIR       Directory containing test.jsonl and where to write test_results.jsonl
+    --output-dir DIR       Directory containing input file and where to write output file
+    --input-file FILE      Input file name (default: test.jsonl)
+    --output-file FILE     Output file name (default: test_results.jsonl)
     --verbose              Enable verbose logging
     --num-workers N        Number of worker processes for parallel processing (default: number of CPU cores)
     --timeout SECONDS      Timeout in seconds (default: 1800 - 0.5 hour)
@@ -78,14 +80,26 @@ except ImportError:
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Run tests from previously extracted test.jsonl files.'
+        description='Run tests from previously extracted test input files.'
     )
     
     parser.add_argument(
         '--output-dir', 
         type=str, 
         required=True,
-        help='Directory containing test.jsonl and where to write test_results.jsonl'
+        help='Directory containing input file and where to write output file'
+    )
+    parser.add_argument(
+        '--input-file',
+        type=str,
+        default='test.jsonl',
+        help='Input file name (default: test.jsonl)'
+    )
+    parser.add_argument(
+        '--output-file',
+        type=str,
+        default='test_results.jsonl',
+        help='Output file name (default: test_results.jsonl)'
     )
     parser.add_argument(
         '--verbose', 
@@ -115,7 +129,7 @@ def parse_arguments():
 
 def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     """
-    Run tests from previously extracted test.jsonl file without creating virtual environments.
+    Run tests from previously extracted test input file without creating virtual environments.
     Tests will be run using pytest with the system Python interpreter directly in the repository directories
     where the tests were originally located.
     
@@ -128,19 +142,23 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     # Configure logging
     logger = configure_process_logging(args.verbose)
     
-    # Verify output directory and test.jsonl exist
+    # Verify output directory exists
     output_dir = Path(args.output_dir)
     if not output_dir.exists():
         logger.error(f"Output directory {output_dir} does not exist")
         return 1
     
-    test_jsonl_path = output_dir / "test.jsonl"
+    # Use specified input and output file names
+    input_file = args.input_file
+    output_file = args.output_file
+    
+    test_jsonl_path = output_dir / input_file
     if not test_jsonl_path.exists():
         logger.error(f"Test file {test_jsonl_path} does not exist. Run extraction first.")
         return 1
     
     # Create or clear test_results.jsonl file
-    test_results_jsonl_path = output_dir / "test_results.jsonl"
+    test_results_jsonl_path = output_dir / output_file
     if test_results_jsonl_path.exists():
         logger.info(f"Clearing existing test results file: {test_results_jsonl_path}")
         with open(test_results_jsonl_path, 'w') as f:
@@ -149,7 +167,7 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     # Track repositories with their test data
     repositories_data = []
     
-    # Read repositories from test.jsonl
+    # Read repositories from input file
     logger.info(f"Reading test data from {test_jsonl_path}")
     with open(test_jsonl_path, 'r') as f:
         for line in f:
@@ -159,13 +177,13 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
                     record = json.loads(line)
                     repositories_data.append(record)
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse line in test.jsonl: {e}")
+                    logger.warning(f"Failed to parse line in {input_file}: {e}")
     
     logger.info(f"Found {len(repositories_data)} repositories with test data")
     
     # Check if there are no repositories found
     if len(repositories_data) == 0:
-        logger.info("No repositories found in test.jsonl")
+        logger.info(f"No repositories found in {input_file}")
         return 1
     
     # Set require_tested_files flag
@@ -250,7 +268,7 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
                 logger.warning(f"Repository directory {repo_path} does not exist. Skipping.")
     
     if not repositories:
-        logger.error("No valid repository paths found in test.jsonl. Exiting.")
+        logger.error(f"No valid repository paths found in {input_file}. Exiting.")
         return 1
     
     logger.info(f"Running tests for {len(repositories)} repositories in parallel")
@@ -663,7 +681,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                     add_log_entry(f"Error processing test file path {test_file_path}: {str(e)}", level="WARNING")
             
             if test_files:
-                add_log_entry(f"Using {len(test_files)} test files from test.jsonl")
+                add_log_entry(f"Using {len(test_files)} test files from input file")
             else:
                 add_log_entry("None of the provided test files were found", level="WARNING")
                 result_data["status"] = "skipped"
@@ -845,7 +863,7 @@ def main():
     try:
         args = parse_arguments()
         
-        # Run tests from test.jsonl
+        # Run tests from input file
         return_code = run_tests_from_jsonl(args)
         
         # Force cleanup of any remaining processes
