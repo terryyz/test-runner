@@ -781,7 +781,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                             skipped = testcase.findall("skipped")
                             
                             if failures:
-                                test_data["status"] = "failure"
+                                test_data["status"] = "failed"
                                 test_data["message"] = failures[0].get("message", "")
                                 test_data["traceback"] = failures[0].text
                             elif errors:
@@ -836,7 +836,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                 # Add test details
                 found_tests = len(xml_results)
                 passed_tests = sum(1 for t in xml_results if t["status"] == "passed")
-                failed_tests = sum(1 for t in xml_results if t["status"] in ["failure", "error"])
+                failed_tests = sum(1 for t in xml_results if t["status"] in ["failed", "error"])
                 skipped_tests = sum(1 for t in xml_results if t["status"] == "skipped")
                 
                 result_data["tests"]["found"] = found_tests
@@ -850,7 +850,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                 # Log summary of test case mapping
                 add_log_entry(f"Test case mapping summary: mapped {len(test_case_status_map)} test cases", level="INFO")
                 add_log_entry(f"  - Passed: {sum(1 for status in test_case_status_map.values() if status == 'passed')}", level="INFO")
-                add_log_entry(f"  - Failed: {sum(1 for status in test_case_status_map.values() if status in ['failure', 'error'])}", level="INFO")
+                add_log_entry(f"  - Failed: {sum(1 for status in test_case_status_map.values() if status in ['failed', 'error'])}", level="INFO")
                 add_log_entry(f"  - Skipped: {sum(1 for status in test_case_status_map.values() if status == 'skipped')}", level="INFO")
                 
                 # Add test details for pytest
