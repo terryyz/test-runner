@@ -144,10 +144,7 @@ def process_repo(repo_data_line, line_num, working_dir=None, skip_regex=None, dr
                 full_path = os.path.join(tested_file_dir, test_filename)
                 
                 # Calculate relative path for the test file from the repository root
-                if working_dir:
-                    relative_path = str(Path(full_path).relative_to(adjusted_repo_path))
-                else:
-                    relative_path = test_filename
+                relative_path = os.path.relpath(full_path, adjusted_repo_path)
                 
                 # Check if parent directory exists, create if needed
                 if not os.path.isdir(tested_file_dir):

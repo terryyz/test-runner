@@ -7,12 +7,11 @@ and runs the tests using the current Python environment. It handles both verbose
 and non-verbose modes.
 
 Usage:
-    python run_tests.py --output-dir output_path [--input-file input.jsonl] [--output-file results.jsonl] [--verbose] [--num-workers N]
+    python run_tests.py [--input-file input.jsonl] [--output-file results.jsonl] [--verbose] [--num-workers N]
 
 Options:
-    --output-dir DIR       Directory containing input file and where to write output file
-    --input-file FILE      Input file name (default: test.jsonl)
-    --output-file FILE     Output file name (default: test_results.jsonl)
+    --input-file FILE      Input file name (default: test.jsonl in current directory)
+    --output-file FILE     Output file name (default: test_results.jsonl in current directory)
     --verbose              Enable verbose logging
     --num-workers N        Number of worker processes for parallel processing (default: number of CPU cores)
     --timeout SECONDS      Timeout in seconds (default: 1800 - 0.5 hour)
@@ -39,6 +38,7 @@ import psutil
 import threading
 import functools
 import traceback
+import re
 
 # Modify import to work from any directory
 # First determine the script's directory to use as base for importing
@@ -83,12 +83,6 @@ def parse_arguments():
         description='Run tests from previously extracted test input files.'
     )
     
-    parser.add_argument(
-        '--output-dir', 
-        type=str, 
-        required=True,
-        help='Directory containing input file and where to write output file'
-    )
     parser.add_argument(
         '--input-file',
         type=str,
@@ -142,23 +136,16 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     # Configure logging
     logger = configure_process_logging(args.verbose)
     
-    # Verify output directory exists
-    output_dir = Path(args.output_dir)
-    if not output_dir.exists():
-        logger.error(f"Output directory {output_dir} does not exist")
-        return 1
+    # Handle file paths - working from current directory
+    test_jsonl_path = Path(args.input_file)
+    test_results_jsonl_path = Path(args.output_file)
     
-    # Use specified input and output file names
-    input_file = args.input_file
-    output_file = args.output_file
-    
-    test_jsonl_path = output_dir / input_file
+    # Check if input file exists
     if not test_jsonl_path.exists():
         logger.error(f"Test file {test_jsonl_path} does not exist. Run extraction first.")
         return 1
     
     # Create or clear test_results.jsonl file
-    test_results_jsonl_path = output_dir / output_file
     if test_results_jsonl_path.exists():
         logger.info(f"Clearing existing test results file: {test_results_jsonl_path}")
         with open(test_results_jsonl_path, 'w') as f:
@@ -177,13 +164,13 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
                     record = json.loads(line)
                     repositories_data.append(record)
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse line in {input_file}: {e}")
+                    logger.warning(f"Failed to parse line in {args.input_file}: {e}")
     
     logger.info(f"Found {len(repositories_data)} repositories with test data")
     
     # Check if there are no repositories found
     if len(repositories_data) == 0:
-        logger.info(f"No repositories found in {input_file}")
+        logger.info(f"No repositories found in {args.input_file}")
         return 1
     
     # Set require_tested_files flag
@@ -268,7 +255,7 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
                 logger.warning(f"Repository directory {repo_path} does not exist. Skipping.")
     
     if not repositories:
-        logger.error(f"No valid repository paths found in {input_file}. Exiting.")
+        logger.error(f"No valid repository paths found in {test_jsonl_path.name}. Exiting.")
         return 1
     
     logger.info(f"Running tests for {len(repositories)} repositories in parallel")
@@ -277,7 +264,7 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     unified_venv = None
     
     # Run tests in parallel
-    test_results = run_tests_parallel(repositories, output_dir, unified_venv, args, repo_test_info, logger)
+    test_results = run_tests_parallel(repositories, None, unified_venv, args, repo_test_info, logger)
 
     # Write test results to jsonl file
     results_written = 0
@@ -757,17 +744,33 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                 
                 # Check if XML file was generated
                 xml_results = []
+                test_case_status_map = {}  # New dictionary to map test case names to status
                 if os.path.exists(xml_output_file):
                     try:
                         import xml.etree.ElementTree as ET
                         tree = ET.parse(xml_output_file)
                         root = tree.getroot()
                         
+                        # Log metadata information for debugging
+                        if test_metadata:
+                            add_log_entry(f"Found test metadata for {len(test_metadata)} test files", level="INFO")
+                            for test_path, metadata in test_metadata.items():
+                                if "group" in metadata:
+                                    group_count = len(metadata["group"])
+                                    add_log_entry(f"Test file {test_path} has {group_count} groups", level="INFO")
+                        
                         # Extract test cases
                         for testcase in root.findall(".//testcase"):
+                            test_name = testcase.get("name")
+                            class_name = testcase.get("classname")
+                            
+                            # Log test case information
+                            add_log_entry(f"Processing test case: {class_name}.{test_name}", level="INFO")
+                            
+                            # Create test data object
                             test_data = {
-                                "name": testcase.get("name"),
-                                "classname": testcase.get("classname"),
+                                "name": test_name,
+                                "classname": class_name,
                                 "time": float(testcase.get("time", 0)),
                                 "status": "passed"
                             }
@@ -790,6 +793,22 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                                 test_data["message"] = skipped[0].get("message", "")
                             
                             xml_results.append(test_data)
+                            
+                            # Look for patterns like test_manage_3, test_manage_10 etc.
+                            match = re.match(r'(.*?)_(\d+)(\..+)?$', class_name)
+                            if match:
+                                file_id = match.group(2)  # This is the numeric ID
+                                add_log_entry(f"Extracted file ID {file_id} from class name {class_name}", level="INFO")
+                                
+                                # Extract the actual class name (last part after the last dot)
+                                class_parts = class_name.split('.')
+                                actual_class_name = class_parts[-1] if class_parts else class_name
+                                
+                                # Create key using the extracted file ID and actual class name
+                                test_case_key = f"{file_id}.{actual_class_name}.{test_name}"
+                                test_case_status_map[test_case_key] = test_data["status"]
+                                
+                                add_log_entry(f"Mapped test case: {class_name}.{test_name} -> {test_case_key} [{test_data['status']}]", level="INFO")
                     except Exception as e:
                         add_log_entry(f"Error parsing XML results: {str(e)}", level="ERROR")
                 
@@ -824,6 +843,15 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                 result_data["tests"]["passed"] = passed_tests
                 result_data["tests"]["failed"] = failed_tests
                 result_data["tests"]["skipped"] = skipped_tests
+                
+                # Add test case status map to the result
+                result_data["tests"]["test_case_status_map"] = test_case_status_map
+                
+                # Log summary of test case mapping
+                add_log_entry(f"Test case mapping summary: mapped {len(test_case_status_map)} test cases", level="INFO")
+                add_log_entry(f"  - Passed: {sum(1 for status in test_case_status_map.values() if status == 'passed')}", level="INFO")
+                add_log_entry(f"  - Failed: {sum(1 for status in test_case_status_map.values() if status in ['failure', 'error'])}", level="INFO")
+                add_log_entry(f"  - Skipped: {sum(1 for status in test_case_status_map.values() if status == 'skipped')}", level="INFO")
                 
                 # Add test details for pytest
                 result_data["tests"]["details"] = [{
