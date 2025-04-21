@@ -16,6 +16,7 @@ Options:
     --num-workers N        Number of worker processes for parallel processing (default: number of CPU cores)
     --timeout SECONDS      Timeout in seconds (default: 1800 - 0.5 hour)
     --require-tested-files Only run test files that have tested_files information
+    --skip-pytest-flags    Skip restrictive pytest flags (--noconftest, -o addopts="") for tests related to pytest
 """
 
 import argparse
@@ -74,6 +75,9 @@ except ImportError:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         
+        # Make sure we don't propagate to the root logger, which might have different settings
+        logger.propagate = False
+        
         return logger
 
 
@@ -116,6 +120,11 @@ def parse_arguments():
         '--require-tested-files',
         action='store_true',
         help='Only run test files that have tested_files information'
+    )
+    parser.add_argument(
+        '--skip-pytest-flags',
+        action='store_true',
+        help='Skip restrictive pytest flags (--noconftest, -o addopts="") for tests related to pytest itself'
     )
     
     return parser.parse_args()
@@ -526,6 +535,9 @@ def process_repository(repo, output_dir, unified_venv, args, repo_test_info=None
         dict: Test results for the repository
     """
     try:
+        # Configure logger with the correct verbose setting
+        logger = configure_process_logging(args.verbose)
+        
         test_file_list = None
         test_file_metadata = None
         
@@ -578,6 +590,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
     Returns:
         dict: Test results
     """
+    # Configure logger with the correct verbose setting
     logger = configure_process_logging(args.verbose)
     
     result_data = {
@@ -707,17 +720,34 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
             # Construct pytest command
             python_exec = sys.executable
             
+            # Check if any test files are related to pytest itself
+            pytest_related_tests = False
+            for test_path in test_file_paths:
+                # Check if the test is related to pytest based on filename or metadata
+                if "pytest" in test_path.lower() or (test_metadata and any("pytest" in str(meta).lower() for meta in test_metadata.values())):
+                    pytest_related_tests = True
+                    add_log_entry(f"Detected pytest-related test: {test_path}", level="INFO")
+                    break
+            
+            # Base command that's always used
             cmd = [
                 python_exec, "-m", "pytest",
                 *test_file_paths,
                 "-v",
-                "--noconftest",
-                "-o",
-                "addopts=''",
-                "--continue-on-collection-errors",
                 f"--junitxml={xml_output_file}",
                 "--color=no"
             ]
+            
+            # Add restrictive flags only if not testing pytest itself
+            if not (pytest_related_tests or args.skip_pytest_flags):
+                cmd.extend([
+                    "--noconftest",
+                    "-o",
+                    "addopts=''",
+                    "--continue-on-collection-errors",
+                ])
+            else:
+                add_log_entry("Running with modified pytest flags to allow pytest testing", level="INFO")
             
             add_log_entry(f"Running command: {' '.join(cmd)}")
             
@@ -794,21 +824,28 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                             
                             xml_results.append(test_data)
                             
-                            # Look for patterns like test_manage_3, test_manage_10 etc.
-                            match = re.match(r'(.*?)_(\d+)(\..+)?$', class_name)
-                            if match:
-                                file_id = match.group(2)  # This is the numeric ID
-                                add_log_entry(f"Extracted file ID {file_id} from class name {class_name}", level="INFO")
+                            # Group test cases by test file
+                            # Extract the file name from the class_name (assumed format: test_manage_X.module.TestClass)
+                            class_parts = class_name.split('.')
+                            if len(class_parts) > 0:
+                                # Find the test file name (e.g., test_manage_X)
+                                file_part = ".".join(class_parts[:-1])
                                 
-                                # Extract the actual class name (last part after the last dot)
-                                class_parts = class_name.split('.')
-                                actual_class_name = class_parts[-1] if class_parts else class_name
-                                
-                                # Create key using the extracted file ID and actual class name
-                                test_case_key = f"{file_id}.{actual_class_name}.{test_name}"
-                                test_case_status_map[test_case_key] = test_data["status"]
-                                
-                                add_log_entry(f"Mapped test case: {class_name}.{test_name} -> {test_case_key} [{test_data['status']}]", level="INFO")
+                                if file_part:
+                                    # Extract the actual class name (last part after the last dot)
+                                    actual_class_name = class_parts[-1] if class_parts else class_name
+                                    
+                                    # Create a key using just the class name and test name
+                                    test_case_key = f"{actual_class_name}.{test_name}"
+                                    
+                                    # Initialize the dictionary for this test file if it doesn't exist
+                                    if file_part not in test_case_status_map:
+                                        test_case_status_map[file_part] = {}
+                                    
+                                    # Add the test case status to the dictionary
+                                    test_case_status_map[file_part][test_case_key] = test_data["status"]
+                                    
+                                    add_log_entry(f"Mapped test case: {class_name}.{test_name} -> {file_part}: {test_case_key} [{test_data['status']}]", level="INFO")
                     except Exception as e:
                         add_log_entry(f"Error parsing XML results: {str(e)}", level="ERROR")
                 
@@ -848,10 +885,25 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                 result_data["tests"]["test_case_status_map"] = test_case_status_map
                 
                 # Log summary of test case mapping
-                add_log_entry(f"Test case mapping summary: mapped {len(test_case_status_map)} test cases", level="INFO")
-                add_log_entry(f"  - Passed: {sum(1 for status in test_case_status_map.values() if status == 'passed')}", level="INFO")
-                add_log_entry(f"  - Failed: {sum(1 for status in test_case_status_map.values() if status in ['failed', 'error'])}", level="INFO")
-                add_log_entry(f"  - Skipped: {sum(1 for status in test_case_status_map.values() if status == 'skipped')}", level="INFO")
+                add_log_entry(f"Test case mapping summary: mapped {sum(len(cases) for cases in test_case_status_map.values())} test cases", level="INFO")
+                
+                # Count total passed, failed, and skipped tests across all test files
+                total_passed = 0
+                total_failed = 0
+                total_skipped = 0
+                
+                for test_file, cases in test_case_status_map.items():
+                    file_passed = sum(1 for status in cases.values() if status == 'passed')
+                    file_failed = sum(1 for status in cases.values() if status in ['failed', 'error'])
+                    file_skipped = sum(1 for status in cases.values() if status == 'skipped')
+                    
+                    total_passed += file_passed
+                    total_failed += file_failed
+                    total_skipped += file_skipped
+                    
+                    add_log_entry(f"  - {test_file}: {len(cases)} tests ({file_passed} passed, {file_failed} failed, {file_skipped} skipped)", level="INFO")
+                
+                add_log_entry(f"  - Total: Passed: {total_passed}, Failed: {total_failed}, Skipped: {total_skipped}", level="INFO")
                 
                 # Add test details for pytest
                 result_data["tests"]["details"] = [{

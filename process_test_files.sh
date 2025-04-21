@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Script to process filtered test repository files and run tests
-# Usage: ./process_test_files.sh
+git clone https://github.com/terryyz/test-runner.git
+pip install -e test-runner
 
 # Set error handling
 set -e
@@ -35,8 +35,10 @@ for FILE in /mnt/bn/tiktok-mm-5/aiic/users/terry/filtered_test_tmp_repo_*.jsonl;
     echo "Step 4: Copying output file to /mnt/bn/tiktok-mm-5/aiic/users/terry/" | tee -a "$LOG_FILE"
     cp "output_test_tmp_repo_$ID.jsonl" /mnt/bn/tiktok-mm-5/aiic/users/terry/
     
+    rm -rf tmp_repo_$ID
+    
     echo "Finished processing $FILENAME" | tee -a "$LOG_FILE"
     echo "----------------------------------------" | tee -a "$LOG_FILE"
 done
 
-echo "All files processed successfully at $(date)" | tee -a "$LOG_FILE" 
+echo "All files processed successfully at $(date)" | tee -a "$LOG_FILE"
