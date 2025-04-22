@@ -17,6 +17,7 @@ Options:
     --timeout SECONDS      Timeout in seconds (default: 1800 - 0.5 hour)
     --require-tested-files Only run test files that have tested_files information
     --skip-pytest-flags    Skip restrictive pytest flags (--noconftest, -o addopts="") for tests related to pytest
+    --use-separate-envs    Create separate virtual environments for each repository
 """
 
 import argparse
@@ -40,6 +41,7 @@ import threading
 import functools
 import traceback
 import re
+import venv
 
 # Modify import to work from any directory
 # First determine the script's directory to use as base for importing
@@ -79,6 +81,46 @@ except ImportError:
         logger.propagate = False
         
         return logger
+
+
+def create_virtual_env(repo_path, logger):
+    """Create a minimal virtual environment for a repository without installing dependencies.
+    
+    Args:
+        repo_path (Path): Path to the repository
+        logger (logging.Logger): Logger instance
+    
+    Returns:
+        Path: Path to the virtual environment Python executable or None if creation fails
+    """
+    try:
+        # Create a temporary directory for the virtual environment
+        venv_dir = tempfile.mkdtemp(prefix=f"venv_{repo_path.name}_")
+        venv_path = Path(venv_dir)
+        
+        logger.info(f"Creating minimal virtual environment at {venv_path}")
+        
+        # Create virtual environment
+        venv.create(venv_path, with_pip=True)
+        
+        # Determine the Python executable path in the virtual environment
+        if os.name == 'nt':  # Windows
+            venv_python = venv_path / 'Scripts' / 'python.exe'
+        else:  # Unix/Linux/MacOS
+            venv_python = venv_path / 'bin' / 'python'
+        
+        if not venv_python.exists():
+            logger.error(f"Failed to find Python executable in virtual environment: {venv_python}")
+            return None
+        
+        logger.info(f"Created virtual environment with Python at {venv_python}")
+        
+        # Return the virtual environment Python executable path
+        return venv_python
+    
+    except Exception as e:
+        logger.error(f"Error creating virtual environment: {e}")
+        return None
 
 
 def parse_arguments():
@@ -125,6 +167,11 @@ def parse_arguments():
         '--skip-pytest-flags',
         action='store_true',
         help='Skip restrictive pytest flags (--noconftest, -o addopts="") for tests related to pytest itself'
+    )
+    parser.add_argument(
+        '--use-separate-envs',
+        action='store_true',
+        help='Create separate virtual environments for each repository'
     )
     
     return parser.parse_args()
@@ -269,8 +316,12 @@ def run_tests_from_jsonl(args: argparse.Namespace) -> int:
     
     logger.info(f"Running tests for {len(repositories)} repositories in parallel")
     
-    # Use the current Python environment (no virtual environment)
+    # Determine whether to use separate virtual environments
     unified_venv = None
+    if args.use_separate_envs:
+        logger.info("Using separate virtual environments for each repository")
+    else:
+        logger.info("Using current Python environment for all repositories")
     
     # Run tests in parallel
     test_results = run_tests_parallel(repositories, None, unified_venv, args, repo_test_info, logger)
@@ -618,10 +669,26 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
         elif level == "ERROR":
             logger.error(message)
     
+    venv_python = None
+    env_temp_dir = None
+    
     try:
         # Set working directory to repository path
         working_dir = repo_path
         add_log_entry(f"Working directory set to {working_dir}")
+        
+        # Create a virtual environment if requested
+        if args.use_separate_envs:
+            add_log_entry(f"Creating virtual environment for repository {repo_path.name}")
+            venv_python = create_virtual_env(repo_path, logger)
+            if venv_python:
+                add_log_entry(f"Using virtual environment Python: {venv_python}")
+            else:
+                add_log_entry("Failed to create virtual environment, falling back to system Python", level="WARNING")
+                venv_python = sys.executable
+        else:
+            # Use the system Python interpreter
+            venv_python = sys.executable
         
         # Process test files if provided
         test_files = None
@@ -717,8 +784,10 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
             # Run pytest with XML output for parsing results
             xml_output_file = tempfile.mktemp(suffix=".xml")
             
-            # Construct pytest command
-            python_exec = sys.executable
+            # Construct pytest command using the virtual environment Python if available
+            python_exec = venv_python
+            
+            add_log_entry(f"Using Python executable: {python_exec}")
             
             # Check if any test files are related to pytest itself
             pytest_related_tests = False
@@ -731,7 +800,7 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
             
             # Base command that's always used
             cmd = [
-                python_exec, "-m", "pytest",
+                str(python_exec), "-m", "pytest",
                 *test_file_paths,
                 "-v",
                 f"--junitxml={xml_output_file}",
@@ -751,6 +820,22 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
             
             add_log_entry(f"Running command: {' '.join(cmd)}")
             
+            # Prepare environment variables
+            env_vars = os.environ.copy()
+            
+            # If using a separate virtual environment, set PYTHONPATH to include system paths
+            if args.use_separate_envs and venv_python and venv_python != sys.executable:
+                # Create a PYTHONPATH that includes the current sys.path
+                python_path = os.pathsep.join(sys.path)
+                # Add the repository path to PYTHONPATH
+                if python_path:
+                    python_path = f"{str(repo_path)}{os.pathsep}{python_path}"
+                else:
+                    python_path = str(repo_path)
+                
+                env_vars["PYTHONPATH"] = python_path
+                add_log_entry(f"Setting PYTHONPATH to: {python_path}", level="INFO")
+            
             try:
                 # Set timeout for subprocess
                 timeout = args.timeout
@@ -763,7 +848,8 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
                     cwd=str(working_dir),
                     capture_output=True,
                     text=True,
-                    timeout=timeout
+                    timeout=timeout,
+                    env=env_vars
                 )
                 
                 elapsed_time = time.time() - start_time
@@ -936,6 +1022,17 @@ def run_tests_for_repo(repo_path, output_dir, unified_venv, args, test_file_list
         result_data["error"] = f"Unexpected error: {str(e)}"
         result_data["execution"]["elapsed_time"] = time.time() - result_data["execution"]["start_time"]
         return result_data
+    
+    finally:
+        # Clean up virtual environment directory if we created one
+        if args.use_separate_envs and venv_python and venv_python != sys.executable:
+            try:
+                # Get the virtual environment directory (parent of bin/python)
+                venv_dir = Path(venv_python).parent.parent
+                add_log_entry(f"Cleaning up virtual environment at {venv_dir}")
+                shutil.rmtree(venv_dir, ignore_errors=True)
+            except Exception as e:
+                add_log_entry(f"Error cleaning up virtual environment: {e}", level="WARNING")
 
 
 def main():
