@@ -106,14 +106,27 @@ def create_virtual_env(repo_path, logger):
         # Determine the Python executable path in the virtual environment
         if os.name == 'nt':  # Windows
             venv_python = venv_path / 'Scripts' / 'python.exe'
+            pip_exec = venv_path / 'Scripts' / 'pip.exe'
         else:  # Unix/Linux/MacOS
             venv_python = venv_path / 'bin' / 'python'
+            pip_exec = venv_path / 'bin' / 'pip'
         
         if not venv_python.exists():
             logger.error(f"Failed to find Python executable in virtual environment: {venv_python}")
             return None
         
         logger.info(f"Created virtual environment with Python at {venv_python}")
+        
+        # Install hydra-core in the virtual environment
+        logger.info(f"Installing hydra-core in virtual environment at {venv_path}")
+        try:
+            subprocess.check_call([str(pip_exec), "install", "hydra-core"], 
+                                 stdout=subprocess.PIPE if not logger.level <= logging.INFO else None,
+                                 stderr=subprocess.PIPE if not logger.level <= logging.INFO else None)
+            logger.info("Successfully installed hydra-core")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to install hydra-core: {e}")
+            # Continue even if installation fails - the environment is still usable
         
         # Return the virtual environment Python executable path
         return venv_python
